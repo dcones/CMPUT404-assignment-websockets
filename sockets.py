@@ -22,40 +22,26 @@ app = Flask(__name__)
 sockets = Sockets(app)
 app.debug = True
 
-class Client:
-    def __init__(self):
-        self.queue = queue.Queue()
-
-    def put(self, item):
-        self.queue.put(item, False)
-
-    def get(self):
-        return self.queue.get()
-
 class World:
     def __init__(self):
-        self.clear()
         self.listeners = list()
+        self.clear()
 
     def add_set_listener(self, listener):
         self.listeners.append( listener )
 
-    def update(self, entity, key, value):
-        entry = self.space.get(entity,dict())
-        entry[key] = value
-        self.space[entity] = entry
-        self.update_listeners( entity )
-
     def set(self, entity, data):
         self.space[entity] = data
-        self.update_listeners( entity )
+        self.update_listeners({entity:data})
 
-    def update_listeners(self, entity):
+    def update_listeners(self, data):
+        string = json.dumps(data)
         for listener in self.listeners:
-            listener(entity, self.get(entity))
+            listener(string)
 
     def clear(self):
         self.space = dict()
+        self.update_listeners(self.socket_world())
 
     def get(self, entity):
         return self.space.get(entity,dict())
@@ -63,46 +49,33 @@ class World:
     def world(self):
         return self.space
 
-clients = list()
+    def socket_world(self):
+        return {'world':self.world()}
+
 myWorld = World()
-
-def set_listener( entity, data ):
-    myWorld.set(entity,data)# ''' do something with the update ! '''
-    for client in clients:
-        client.send(json.dumps({entity:data}))
-    return
-
-myWorld.add_set_listener( set_listener )
 
 def read_ws(ws):
     try:
         while True:
             message = ws.receive()
-            if message is None:
-                break
-            else:
-                print('received =',message)
-                for client in clients:
-                    client.put(message)
+            if message:
+                entity, data = list(*json.loads(message).items())
+                myWorld.set(entity, data)
     except:
         pass
 
 @sockets.route('/subscribe')
 def subscribe_socket(ws):
-    # '''Fufill the websocket URL of /subscribe, every update notify the
-    #    websocket and read updates from the websocket '''
-    client = Client()
-    clients.append(client)
+    ws.send(json.dumps(myWorld.socket_world()))
+    client = queue.Queue()
+    myWorld.add_set_listener(client.put_nowait)
     g = spawn(read_ws, ws)
     try:
         while True:
-            message = client.get()
-            ws.send(message)
-            print('subscribe =',message)
+            ws.send(client.get())
     except Exception as e:
         print('WS Error : ',e)
     finally:
-        clients.remove(client)
         kill(g)
 
 # I give this to you, this is how you get the raw body/data portion of a post in flask
@@ -123,7 +96,7 @@ def hello():
 
 @app.route("/entity/<entity>", methods=['POST','PUT'])
 def update(entity):
-    myWorld.set(entity, flask_post_json())
+    myWorld.set(entity,flask_post_json())
     return get_entity(entity)
 
 @app.route("/world", methods=['POST','GET'])
